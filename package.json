@@ -1,0 +1,29 @@
+{
+  "name": "aa-game-maker",
+  "private": true,
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "corepack pnpm --filter @aa-game/api --filter @aa-game/room-server --filter @aa-game/player --filter @aa-game/web --parallel --stream run dev",
+    "bridge": "corepack pnpm --filter @aa-game/local-bridge serve",
+    "build": "corepack pnpm -r --workspace-concurrency=1 run build",
+    "typecheck": "corepack pnpm -r run typecheck",
+    "test": "corepack pnpm -r --if-present run test",
+    "infra:up": "podman compose -f docker/compose.yml up -d",
+    "infra:down": "podman compose -f docker/compose.yml down",
+    "infra:ps": "podman compose -f docker/compose.yml ps"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "sharp"
+    ]
+  }
+}

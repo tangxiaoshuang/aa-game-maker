@@ -1,0 +1,30 @@
+{
+  "name": "@aa-game/room-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@aa-game/game-sdk": "workspace:*",
+    "@aa-game/protocol": "workspace:*",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/websocket": "^11.1.0",
+    "fastify": "^5.2.2",
+    "ioredis": "^5.6.0",
+    "workerd": "^1.20250906.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.1",
+    "@types/ws": "^8.18.1"
+  }
+}

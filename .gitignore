@@ -1,0 +1,13 @@
+node_modules/
+.turbo/
+.next/
+dist/
+out/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+.workerd-tmp/
+apps/web/public/esbuild.wasm
+*.tsbuildinfo

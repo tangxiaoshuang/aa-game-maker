@@ -1,0 +1,30 @@
+{
+  "name": "@aa-game/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare:wasm": "node scripts/copy-wasm.mjs",
+    "dev": "node scripts/copy-wasm.mjs && next dev -H 0.0.0.0 -p 3000",
+    "build": "node scripts/copy-wasm.mjs && next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aa-game/harness-core": "workspace:*",
+    "@aa-game/protocol": "workspace:*",
+    "@aa-game/templates": "workspace:*",
+    "esbuild-wasm": "^0.25.4",
+    "next": "^15.3.2",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.4",
+    "@types/react-dom": "^19.1.4",
+    "typescript": "^5.8.3"
+  }
+}

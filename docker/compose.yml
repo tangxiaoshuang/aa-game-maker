@@ -1,0 +1,58 @@
+name: aa-game-maker-infra
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: aa-game-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aagame
+      POSTGRES_PASSWORD: aagame_dev_password
+      POSTGRES_DB: aa_game_maker
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aagame -d aa_game_maker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: aa-game-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rustfs:
+    image: docker.io/rustfs/rustfs:latest
+    container_name: aa-game-s3
+    restart: unless-stopped
+    environment:
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: aagameadmin
+      RUSTFS_SECRET_KEY: aagame_s3_dev_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs_data:/data
+      - rustfs_logs:/app/logs
+
+volumes:
+  postgres_data:
+  redis_data:
+  rustfs_data:
+  rustfs_logs:
