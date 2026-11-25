@@ -77,7 +77,7 @@ export function StudioWorkbench() {
 
   const [leftTab, setLeftTab] = useState<LeftTab>("agent");
   const [deviceMode, setDeviceMode] = useState<DeviceViewportMode>("pc");
-  const [targetFps, setTargetFps] = useState<30 | 60>(60);
+  const [targetFps, setTargetFps] = useState<30 | 60 | 120>(60);
   const [splitMultiplayer, setSplitMultiplayer] = useState<boolean>(false);
   const [paused, setPaused] = useState<boolean>(false);
 
@@ -1260,27 +1260,43 @@ export function StudioWorkbench() {
 
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
               <StageMetricsReadout frameRef={primaryFrameRef} />
-              <button
-                onClick={() => {
-                  const next: 30 | 60 = targetFps === 60 ? 30 : 60;
+              <select
+                data-testid="fps-mode-select"
+                aria-label="预览帧率上限"
+                value={targetFps}
+                onChange={(e) => {
+                  const next = Number(e.target.value) as 30 | 60 | 120;
                   setTargetFps(next);
                   postToFrames({ channel: "aa-game-sandbox", type: "SET_TARGET_FPS", targetFps: next }, "primary");
                 }}
-                title="切换 60 FPS 标准模式 / 30 FPS 省电模式"
+                title="切换预览帧率上限：30 FPS 省电 / 60 FPS 标准 / 120 FPS 高刷（需显示器支持高刷）"
                 style={{
-                  background: targetFps === 30 ? "rgba(16,185,129,0.2)" : "#1e293b",
-                  color: targetFps === 30 ? "#34d399" : "#cbd5e1",
-                  border: `1px solid ${targetFps === 30 ? "#10b981" : "#334155"}`,
+                  background:
+                    targetFps === 30
+                      ? "rgba(16,185,129,0.18)"
+                      : targetFps === 120
+                        ? "rgba(56,189,248,0.18)"
+                        : "#1e293b",
+                  color: targetFps === 30 ? "#34d399" : targetFps === 120 ? "#38bdf8" : "#cbd5e1",
+                  border: `1px solid ${targetFps === 30 ? "#10b981" : targetFps === 120 ? "#0284c7" : "#334155"}`,
                   borderRadius: 6,
                   padding: "4px 8px",
+                  fontSize: 12,
                   fontWeight: 700,
                   cursor: "pointer",
-                  whiteSpace: "nowrap",
                   flexShrink: 0,
                 }}
               >
-                {targetFps === 30 ? "🍃 30 FPS 省电" : "⚡ 60 FPS"}
-              </button>
+                <option value={30} style={{ background: "#0f172a", color: "#e2e8f0" }}>
+                  🍃 30 FPS 省电
+                </option>
+                <option value={60} style={{ background: "#0f172a", color: "#e2e8f0" }}>
+                  ⚡ 60 FPS
+                </option>
+                <option value={120} style={{ background: "#0f172a", color: "#e2e8f0" }}>
+                  🚀 120 FPS 高刷
+                </option>
+              </select>
               <button
                 onClick={() => {
                   const next = !paused;

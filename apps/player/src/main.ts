@@ -50,7 +50,10 @@ class SandboxRuntime {
   private userPaused = false;
   private hiddenPaused = false;
   private targetFps = 60;
-  private lastRenderAt = 0;
+  private lastRafAt = 0;
+  private nextRenderAt = 0;
+  private vsyncMs = 16.667;
+  private vsyncInitialized = false;
 
   private currState: unknown = null;
   private prevState: unknown = null;
@@ -61,7 +64,7 @@ class SandboxRuntime {
   private renderMsSum = 0;
   private renderMsSamples = 0;
   private avgRenderMs = 0;
-  private lastFpsSample = performance.now();
+  private lastFpsSample = 0;
   private currentFps = 0;
   private latencyMs = 0;
   private totalRenderedFrames = 0;
@@ -102,6 +105,7 @@ class SandboxRuntime {
       userPaused: this.userPaused,
       targetFps: this.targetFps,
       fps: this.currentFps,
+      vsyncMs: Number(this.vsyncMs.toFixed(2)),
       renderMs: this.avgRenderMs,
       rafActive: this.rafId !== null,
       tickerStarted: this.app?.ticker?.started ?? false,
@@ -196,7 +200,7 @@ class SandboxRuntime {
     await this.cleanup();
     this.payload = payload;
     this.deviceMode = payload.deviceMode;
-    this.targetFps = Math.max(15, Math.min(60, payload.targetFps ?? 60));
+    this.targetFps = Math.max(15, Math.min(120, payload.targetFps ?? 60));
     this.userPaused = false;
     this.hiddenPaused = document.hidden;
     this.runtimeErrors = [];
@@ -209,7 +213,11 @@ class SandboxRuntime {
     this.avgRenderMs = 0;
     this.currentFps = 0;
     this.totalRenderedFrames = 0;
-    this.lastRenderAt = 0;
+    this.lastRafAt = 0;
+    this.nextRenderAt = 0;
+    this.lastFpsSample = 0;
+    this.vsyncMs = 16.667;
+    this.vsyncInitialized = false;
     this.lastSentInputKey = "";
     this.tickIntervalMs = 1000 / Math.max(10, Math.min(60, payload.spec.tickRate || 20));
     statusBanner.style.display = "none";
@@ -595,8 +603,12 @@ class SandboxRuntime {
     }
 
     if (this.rafId === null) {
-      this.lastFpsSample = performance.now();
-      this.lastRenderAt = 0;
+      this.lastRafAt = 0;
+      this.nextRenderAt = 0;
+      this.lastFpsSample = 0;
+      this.frameCounter = 0;
+      this.renderMsSum = 0;
+      this.renderMsSamples = 0;
       this.startRenderLoop();
     }
 
@@ -613,23 +625,62 @@ class SandboxRuntime {
       }
       this.rafId = requestAnimationFrame(loop);
 
-      const minInterval = 1000 / this.targetFps;
-      if (this.lastRenderAt > 0 && now - this.lastRenderAt < minInterval - 1.5) {
-        return;
+      // Estimate native display VSync interval from consecutive rAF deltas (covers ~30Hz-333Hz)
+      if (this.lastRafAt > 0) {
+        const rafDt = now - this.lastRafAt;
+        if (rafDt >= 3 && rafDt <= 35) {
+          if (!this.vsyncInitialized) {
+            this.vsyncMs = rafDt;
+            this.vsyncInitialized = true;
+          } else {
+            this.vsyncMs = this.vsyncMs * 0.85 + rafDt * 0.15;
+          }
+        }
       }
-      this.lastRenderAt = now;
+      this.lastRafAt = now;
 
-      this.frameCounter += 1;
-      if (now - this.lastFpsSample >= 600) {
-        this.currentFps = Math.round((this.frameCounter * 1000) / (now - this.lastFpsSample));
-        this.avgRenderMs =
-          this.renderMsSamples > 0
-            ? Number((this.renderMsSum / this.renderMsSamples).toFixed(2))
-            : 0;
-        this.frameCounter = 0;
-        this.renderMsSum = 0;
-        this.renderMsSamples = 0;
+      // Phase-locked nearest-VSync frame pacing:
+      // 1. When display native VSync is already at or below targetFps (e.g. 60Hz at 60/120 FPS,
+      //    or 120Hz ProMotion at 120 FPS), let hardware VSync drive every frame directly.
+      // 2. Otherwise advance `nextRenderAt` by an exact fixed `frameInterval` (never `= now`)
+      //    and snap to the nearest VSync within 45% of one VSync period so jitter never causes
+      //    cascading phase drift (e.g. 60->57 or 30->27 FPS).
+      const frameInterval = 1000 / this.targetFps;
+      const shouldThrottle = !this.vsyncInitialized || this.vsyncMs < frameInterval * 0.92;
+      if (shouldThrottle) {
+        if (this.nextRenderAt === 0) {
+          this.nextRenderAt = now;
+        }
+        const snapTolerance = Math.min(this.vsyncMs * 0.45, frameInterval * 0.45);
+        if (now + snapTolerance < this.nextRenderAt) {
+          return;
+        }
+        this.nextRenderAt += frameInterval;
+        // Resync cleanly after a long tab hiccup / stall (> 1.5 target frames behind)
+        if (now - this.nextRenderAt > frameInterval * 1.5) {
+          this.nextRenderAt = now + frameInterval;
+        }
+      } else {
+        this.nextRenderAt = 0;
+      }
+
+      if (this.lastFpsSample === 0) {
         this.lastFpsSample = now;
+        this.frameCounter = 0;
+      } else {
+        this.frameCounter += 1;
+        const elapsed = now - this.lastFpsSample;
+        if (elapsed >= 500) {
+          this.currentFps = Math.round((this.frameCounter * 1000) / elapsed);
+          this.avgRenderMs =
+            this.renderMsSamples > 0
+              ? Number((this.renderMsSum / this.renderMsSamples).toFixed(2))
+              : 0;
+          this.frameCounter = 0;
+          this.renderMsSum = 0;
+          this.renderMsSamples = 0;
+          this.lastFpsSample = now;
+        }
       }
 
       if (this.currState && this.renderer && this.app) {
@@ -661,7 +712,12 @@ class SandboxRuntime {
   }
 
   setTargetFps(targetFps: number): void {
-    this.targetFps = Math.max(15, Math.min(60, targetFps));
+    this.targetFps = Math.max(15, Math.min(120, targetFps));
+    this.nextRenderAt = 0;
+    this.lastFpsSample = 0;
+    this.frameCounter = 0;
+    this.renderMsSum = 0;
+    this.renderMsSamples = 0;
     this.emitMetrics();
   }
 
