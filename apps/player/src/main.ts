@@ -4,6 +4,7 @@ import type {
   DeviceViewportMode,
   GameConfigValues,
   LoadGamePayload,
+  PlayerInputState,
   PlayerToWorkbenchMessage,
   RoomPhase,
   RoomPlayerInfo,
@@ -46,7 +47,10 @@ class SandboxRuntime {
 
   private payload: LoadGamePayload | null = null;
   private deviceMode: DeviceViewportMode = "pc";
-  private paused = false;
+  private userPaused = false;
+  private hiddenPaused = false;
+  private targetFps = 60;
+  private lastRenderAt = 0;
 
   private currState: unknown = null;
   private prevState: unknown = null;
@@ -54,9 +58,13 @@ class SandboxRuntime {
   private tickIntervalMs = 50;
   private tickCount = 0;
   private frameCounter = 0;
+  private renderMsSum = 0;
+  private renderMsSamples = 0;
+  private avgRenderMs = 0;
   private lastFpsSample = performance.now();
   private currentFps = 0;
   private latencyMs = 0;
+  private totalRenderedFrames = 0;
 
   private localPlayerId = "local";
   private hostPlayerId = "";
@@ -65,6 +73,11 @@ class SandboxRuntime {
   private roomPhase: RoomPhase = "playing";
   private roomPlayers: RoomPlayerInfo[] = [];
   private runtimeErrors: RuntimeLogEntry[] = [];
+
+  // Reused RendererContext object (zero per-frame allocations)
+  private cachedRenderCtx: GameSDK.RendererContext | null = null;
+  private lastSentInputKey = "";
+  private lastSentInputAt = 0;
 
   constructor() {
     window.addEventListener("error", (ev) => {
@@ -78,6 +91,27 @@ class SandboxRuntime {
         reason instanceof Error ? reason.stack : undefined,
       );
     });
+    document.addEventListener("visibilitychange", () => {
+      this.hiddenPaused = document.hidden;
+      this.applyLoopState();
+    });
+
+    // Expose lightweight read-only diagnostic hook for performance verification
+    (window as unknown as Record<string, unknown>).__AA_PERF__ = () => ({
+      paused: this.isEffectivelyPaused(),
+      userPaused: this.userPaused,
+      targetFps: this.targetFps,
+      fps: this.currentFps,
+      renderMs: this.avgRenderMs,
+      rafActive: this.rafId !== null,
+      tickerStarted: this.app?.ticker?.started ?? false,
+      totalRenderedFrames: this.totalRenderedFrames,
+      tick: this.tickCount,
+    });
+  }
+
+  private isEffectivelyPaused(): boolean {
+    return this.userPaused || this.hiddenPaused;
   }
 
   log(level: RuntimeLogEntry["level"], message: string, stack?: string): void {
@@ -101,15 +135,27 @@ class SandboxRuntime {
     return (await import(/* @vite-ignore */ url)) as T;
   }
 
+  private stopActiveLoops(): void {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.inputTimer !== null) {
+      clearInterval(this.inputTimer);
+      this.inputTimer = null;
+    }
+    if (this.metricsTimer !== null) {
+      clearInterval(this.metricsTimer);
+      this.metricsTimer = null;
+    }
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   async cleanup(): Promise<void> {
-    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
-    if (this.inputTimer !== null) clearInterval(this.inputTimer);
-    if (this.metricsTimer !== null) clearInterval(this.metricsTimer);
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
-    this.rafId = null;
-    this.inputTimer = null;
-    this.metricsTimer = null;
-    this.pingTimer = null;
+    this.stopActiveLoops();
 
     if (this.ws) {
       this.ws.onclose = null;
@@ -126,12 +172,14 @@ class SandboxRuntime {
     }
     this.renderer = null;
     this.localRunner = null;
+    this.cachedRenderCtx = null;
     this.input?.destroy();
     this.input = null;
     this.audio?.destroy();
     this.audio = null;
 
     if (this.app) {
+      this.app.ticker?.stop();
       this.app.destroy(true, { children: true });
       this.app = null;
     }
@@ -148,25 +196,43 @@ class SandboxRuntime {
     await this.cleanup();
     this.payload = payload;
     this.deviceMode = payload.deviceMode;
-    this.paused = false;
+    this.targetFps = Math.max(15, Math.min(60, payload.targetFps ?? 60));
+    this.userPaused = false;
+    this.hiddenPaused = document.hidden;
     this.runtimeErrors = [];
     this.currState = null;
     this.prevState = null;
     this.tickCount = 0;
+    this.frameCounter = 0;
+    this.renderMsSum = 0;
+    this.renderMsSamples = 0;
+    this.avgRenderMs = 0;
+    this.currentFps = 0;
+    this.totalRenderedFrames = 0;
+    this.lastRenderAt = 0;
+    this.lastSentInputKey = "";
     this.tickIntervalMs = 1000 / Math.max(10, Math.min(60, payload.spec.tickRate || 20));
     statusBanner.style.display = "none";
 
     try {
       const app = new PIXI.Application();
+      // Single-pipeline, GPU-friendly init:
+      // - autoStart: false eliminates duplicate Pixi internal ticker
+      // - preserveDrawingBuffer: false restores zero-copy GPU swap chain
+      // - antialias: false avoids expensive Retina MSAA bandwidth (pre-baked sprites stay crisp)
+      // - powerPreference: low-power favors integrated GPU efficiency
       await app.init({
         width: window.innerWidth || 640,
         height: window.innerHeight || 480,
         backgroundColor: 0x070b18,
-        antialias: true,
+        autoStart: false,
+        antialias: false,
+        preserveDrawingBuffer: false,
+        powerPreference: "low-power",
         resolution: Math.min(window.devicePixelRatio || 1, 2),
         autoDensity: true,
-        preserveDrawingBuffer: true,
       });
+      app.ticker.stop();
       stageRoot.appendChild(app.canvas);
       this.app = app;
 
@@ -178,11 +244,17 @@ class SandboxRuntime {
       this.hudLayer = hudLayer;
 
       this.fitWorldToViewport();
-      this.resizeObserver = new ResizeObserver(() => this.fitWorldToViewport());
+      this.resizeObserver = new ResizeObserver(() => {
+        this.fitWorldToViewport();
+        if (this.isEffectivelyPaused()) {
+          this.renderSingleFrame(1);
+        }
+      });
       this.resizeObserver.observe(stageRoot);
 
       this.audio = new GameSDK.ProceduralAudio();
       this.mountInput();
+      this.syncRendererContext();
 
       // Load Renderer bundle
       const clientMod = await this.importEsmString<{
@@ -194,7 +266,7 @@ class SandboxRuntime {
         throw new Error("renderer.ts must export createRenderer()");
       }
       this.renderer = createRenderer();
-      await this.renderer.init(this.makeRendererContext());
+      await this.renderer.init(this.getRendererContext());
 
       if (payload.spec.mode === "multiplayer" && payload.roomWsUrl) {
         this.connectMultiplayer(payload);
@@ -202,8 +274,8 @@ class SandboxRuntime {
         await this.startSingleplayer(payload);
       }
 
-      this.startRenderLoop();
-      this.startMetricsLoop();
+      this.renderSingleFrame(1);
+      this.applyLoopState();
 
       postToParent({
         channel: "aa-game-sandbox",
@@ -211,7 +283,7 @@ class SandboxRuntime {
         title: payload.spec.title,
         mode: payload.spec.mode,
       });
-      this.log("info", `Loaded "${payload.spec.title}" (${payload.spec.mode})`);
+      this.log("info", `Loaded "${payload.spec.title}" (${payload.spec.mode}, cap ${this.targetFps} FPS)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const stack = err instanceof Error ? err.stack : undefined;
@@ -221,19 +293,31 @@ class SandboxRuntime {
     }
   }
 
-  private makeRendererContext(): GameSDK.RendererContext {
-    return {
-      app: this.app!,
-      worldLayer: this.worldLayer!,
-      hudLayer: this.hudLayer!,
-      hudDomRoot: hudRoot,
-      worldSize: this.payload!.spec.worldSize,
-      localPlayerId: this.localPlayerId,
-      audio: this.audio!,
-      assets: this.payload!.assets,
-      config: this.payload!.configValues,
-      isMobile: this.isTouchOrMobile(),
-    };
+  private syncRendererContext(): void {
+    if (!this.app || !this.worldLayer || !this.hudLayer || !this.payload || !this.audio) return;
+    if (!this.cachedRenderCtx) {
+      this.cachedRenderCtx = {
+        app: this.app,
+        worldLayer: this.worldLayer,
+        hudLayer: this.hudLayer,
+        hudDomRoot: hudRoot,
+        worldSize: this.payload.spec.worldSize,
+        localPlayerId: this.localPlayerId,
+        audio: this.audio,
+        assets: this.payload.assets,
+        config: this.payload.configValues,
+        isMobile: this.isTouchOrMobile(),
+      };
+    } else {
+      this.cachedRenderCtx.localPlayerId = this.localPlayerId;
+      this.cachedRenderCtx.config = this.payload.configValues;
+      this.cachedRenderCtx.isMobile = this.isTouchOrMobile();
+    }
+  }
+
+  private getRendererContext(): GameSDK.RendererContext {
+    this.syncRendererContext();
+    return this.cachedRenderCtx!;
   }
 
   private mountInput(): void {
@@ -272,6 +356,7 @@ class SandboxRuntime {
     const sim = createSimulation();
     this.localPlayerId = "local";
     this.roomPhase = "playing";
+    this.syncRendererContext();
     this.localRunner = new GameSDK.HeadlessRunner(sim, {
       worldSize: payload.spec.worldSize,
       tickRate: payload.spec.tickRate,
@@ -279,12 +364,17 @@ class SandboxRuntime {
       seed: Date.now() & 0x7fffffff,
     });
     this.localRunner.addPlayer({ id: "local", name: "Player", color: "#38bdf8" });
-    this.currState = this.localRunner.getSnapshot();
+    this.currState = structuredClone(this.localRunner.getSnapshot());
     this.prevState = this.currState;
     this.lastSnapTime = performance.now();
+  }
+
+  private startSingleplayerTickTimer(): void {
+    if (this.inputTimer !== null) clearInterval(this.inputTimer);
+    if (!this.localRunner) return;
 
     this.inputTimer = window.setInterval(() => {
-      if (this.paused || !this.localRunner || !this.input) return;
+      if (this.isEffectivelyPaused() || !this.localRunner || !this.input) return;
       this.localRunner.applyInput("local", this.input.sample());
       const res = this.localRunner.step();
       this.prevState = this.currState;
@@ -292,7 +382,7 @@ class SandboxRuntime {
       this.tickCount = res.tick;
       this.lastSnapTime = performance.now();
       for (const ev of res.events) {
-        this.renderer?.onEvent?.(ev, this.makeRendererContext());
+        this.renderer?.onEvent?.(ev, this.getRendererContext());
       }
     }, this.tickIntervalMs);
   }
@@ -319,28 +409,33 @@ class SandboxRuntime {
           this.roomPlayers = msg.players;
           this.roomPhase = msg.phase;
           this.tickIntervalMs = 1000 / Math.max(10, msg.tickRate);
+          this.syncRendererContext();
           if (msg.snapshot) {
             this.prevState = msg.snapshot;
             this.currState = msg.snapshot;
             this.lastSnapTime = performance.now();
+            this.renderSingleFrame(1);
           }
           this.renderLobbyOverlay();
-          this.startNetworkLoops();
+          this.applyLoopState();
         } else if (msg.type === "room_update") {
           this.hostPlayerId = msg.hostPlayerId;
           this.roomPlayers = msg.players;
           this.roomPhase = msg.phase;
           if (this.payload) {
             this.payload.configValues = { ...msg.config };
+            this.syncRendererContext();
           }
           this.renderLobbyOverlay();
+          this.applyLoopState();
         } else if (msg.type === "snapshot") {
+          if (this.isEffectivelyPaused()) return;
           this.prevState = this.currState ?? msg.state;
           this.currState = msg.state;
           this.tickCount = msg.tick;
           this.lastSnapTime = performance.now();
           for (const ev of msg.events) {
-            this.renderer?.onEvent?.(ev, this.makeRendererContext());
+            this.renderer?.onEvent?.(ev, this.getRendererContext());
           }
         } else if (msg.type === "pong") {
           this.latencyMs = Math.max(0, Math.round(performance.now() - msg.t));
@@ -366,16 +461,23 @@ class SandboxRuntime {
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
 
     this.inputTimer = window.setInterval(() => {
-      if (this.paused || this.roomPhase !== "playing") return;
+      if (this.isEffectivelyPaused() || this.roomPhase !== "playing") return;
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.input) return;
-      this.ws.send(JSON.stringify({ type: "input", input: this.input.sample() }));
+      const sample: PlayerInputState = this.input.sample();
+      const key = `${sample.moveX},${sample.moveY},${sample.primary ? 1 : 0},${sample.secondary ? 1 : 0}`;
+      const now = performance.now();
+      // Skip redundant identical idle input frames (heartbeat every 250ms)
+      if (key === this.lastSentInputKey && now - this.lastSentInputAt < 250) return;
+      this.lastSentInputKey = key;
+      this.lastSentInputAt = now;
+      this.ws.send(JSON.stringify({ type: "input", input: sample }));
     }, this.tickIntervalMs);
 
     this.pingTimer = window.setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: "ping", t: performance.now() }));
       }
-    }, 2000);
+    }, 3000);
   }
 
   private renderLobbyOverlay(): void {
@@ -431,55 +533,117 @@ class SandboxRuntime {
     });
   }
 
+  private renderSingleFrame(alpha: number): void {
+    if (!this.currState || !this.renderer || !this.app) return;
+    const t0 = performance.now();
+    try {
+      this.renderer.render(this.currState, this.prevState, alpha, this.getRendererContext());
+      this.app.renderer.render(this.app.stage);
+      const dtMs = performance.now() - t0;
+      this.renderMsSum += dtMs;
+      this.renderMsSamples += 1;
+      this.totalRenderedFrames += 1;
+    } catch (err) {
+      this.log(
+        "error",
+        err instanceof Error ? err.message : String(err),
+        err instanceof Error ? err.stack : undefined,
+      );
+      this.setPaused(true);
+    }
+  }
+
+  private emitMetrics(): void {
+    postToParent({
+      channel: "aa-game-sandbox",
+      type: "METRICS",
+      metrics: {
+        fps: this.isEffectivelyPaused() ? 0 : this.currentFps,
+        renderMs: this.isEffectivelyPaused() ? 0 : this.avgRenderMs,
+        targetFps: this.targetFps,
+        paused: this.isEffectivelyPaused(),
+        tick: this.tickCount,
+        roomId: this.roomId || undefined,
+        roomCode: this.roomCode || undefined,
+        playersCount: this.roomPlayers.length || undefined,
+        latencyMs: this.roomId ? this.latencyMs : undefined,
+        phase: this.roomPhase,
+      },
+    });
+  }
+
+  private applyLoopState(): void {
+    if (!this.app || !this.payload) return;
+    const shouldSleep =
+      this.isEffectivelyPaused() || (this.payload.spec.mode === "multiplayer" && this.roomPhase !== "playing");
+
+    if (shouldSleep) {
+      this.stopActiveLoops();
+      this.currentFps = 0;
+      this.avgRenderMs = 0;
+      this.frameCounter = 0;
+      this.renderMsSum = 0;
+      this.renderMsSamples = 0;
+      this.emitMetrics();
+      return;
+    }
+
+    if (this.localRunner && this.inputTimer === null) {
+      this.startSingleplayerTickTimer();
+    } else if (this.ws && this.inputTimer === null) {
+      this.startNetworkLoops();
+    }
+
+    if (this.rafId === null) {
+      this.lastFpsSample = performance.now();
+      this.lastRenderAt = 0;
+      this.startRenderLoop();
+    }
+
+    if (this.metricsTimer === null) {
+      this.metricsTimer = window.setInterval(() => this.emitMetrics(), 800);
+    }
+  }
+
   private startRenderLoop(): void {
-    const loop = () => {
+    const loop = (now: number) => {
+      if (this.isEffectivelyPaused()) {
+        this.rafId = null;
+        return;
+      }
       this.rafId = requestAnimationFrame(loop);
+
+      const minInterval = 1000 / this.targetFps;
+      if (this.lastRenderAt > 0 && now - this.lastRenderAt < minInterval - 1.5) {
+        return;
+      }
+      this.lastRenderAt = now;
+
       this.frameCounter += 1;
-      const now = performance.now();
-      if (now - this.lastFpsSample >= 500) {
+      if (now - this.lastFpsSample >= 600) {
         this.currentFps = Math.round((this.frameCounter * 1000) / (now - this.lastFpsSample));
+        this.avgRenderMs =
+          this.renderMsSamples > 0
+            ? Number((this.renderMsSum / this.renderMsSamples).toFixed(2))
+            : 0;
         this.frameCounter = 0;
+        this.renderMsSum = 0;
+        this.renderMsSamples = 0;
         this.lastFpsSample = now;
       }
 
       if (this.currState && this.renderer && this.app) {
         const alpha = Math.min(1, Math.max(0, (now - this.lastSnapTime) / this.tickIntervalMs));
-        try {
-          this.renderer.render(this.currState, this.prevState, alpha, this.makeRendererContext());
-        } catch (err) {
-          this.log(
-            "error",
-            err instanceof Error ? err.message : String(err),
-            err instanceof Error ? err.stack : undefined,
-          );
-          this.paused = true;
-        }
+        this.renderSingleFrame(alpha);
       }
     };
     this.rafId = requestAnimationFrame(loop);
   }
 
-  private startMetricsLoop(): void {
-    this.metricsTimer = window.setInterval(() => {
-      postToParent({
-        channel: "aa-game-sandbox",
-        type: "METRICS",
-        metrics: {
-          fps: this.currentFps,
-          tick: this.tickCount,
-          roomId: this.roomId || undefined,
-          roomCode: this.roomCode || undefined,
-          playersCount: this.roomPlayers.length || undefined,
-          latencyMs: this.roomId ? this.latencyMs : undefined,
-          phase: this.roomPhase,
-        },
-      });
-    }, 600);
-  }
-
   updateConfig(configValues: GameConfigValues): void {
     if (!this.payload) return;
     this.payload.configValues = { ...this.payload.configValues, ...configValues };
+    this.syncRendererContext();
     this.localRunner?.updateConfig(this.payload.configValues);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "update_config", config: this.payload.configValues }));
@@ -489,20 +653,35 @@ class SandboxRuntime {
   setDeviceMode(mode: DeviceViewportMode): void {
     this.deviceMode = mode;
     this.mountInput();
+    this.syncRendererContext();
     this.fitWorldToViewport();
+    if (this.isEffectivelyPaused()) {
+      this.renderSingleFrame(1);
+    }
+  }
+
+  setTargetFps(targetFps: number): void {
+    this.targetFps = Math.max(15, Math.min(60, targetFps));
+    this.emitMetrics();
   }
 
   async restart(): Promise<void> {
     if (!this.payload) return;
+    this.userPaused = false;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "restart" }));
+      this.applyLoopState();
     } else {
       await this.load(this.payload);
     }
   }
 
   setPaused(paused: boolean): void {
-    this.paused = paused;
+    this.userPaused = paused;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: paused ? "pause" : "resume" }));
+    }
+    this.applyLoopState();
   }
 
   runProbe(): void {
@@ -512,12 +691,38 @@ class SandboxRuntime {
 
     try {
       if (this.app?.canvas) {
+        // Because preserveDrawingBuffer is false for GPU efficiency, render one fresh frame
+        // synchronously right before sampling the WebGL canvas.
+        if (this.currState && this.renderer) {
+          this.renderer.render(this.currState, this.prevState, 1, this.getRendererContext());
+        }
+        this.app.renderer.render(this.app.stage);
+
         const sampleCanvas = document.createElement("canvas");
         sampleCanvas.width = 48;
         sampleCanvas.height = 48;
         const ctx2d = sampleCanvas.getContext("2d");
         if (ctx2d) {
-          ctx2d.drawImage(this.app.canvas, 0, 0, 48, 48);
+          // Sample the active worldLayer bounding rect (excluding letterbox bars on tall/narrow viewports)
+          const canvas = this.app.canvas;
+          let sx = 0;
+          let sy = 0;
+          let sw = canvas.width;
+          let sh = canvas.height;
+          if (this.payload && this.worldLayer) {
+            const res = this.app.renderer.resolution || 1;
+            const wx = this.worldLayer.position.x * res;
+            const wy = this.worldLayer.position.y * res;
+            const ww = this.payload.spec.worldSize.width * this.worldLayer.scale.x * res;
+            const wh = this.payload.spec.worldSize.height * this.worldLayer.scale.y * res;
+            if (ww >= 16 && wh >= 16) {
+              sx = Math.max(0, Math.floor(wx));
+              sy = Math.max(0, Math.floor(wy));
+              sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(ww)));
+              sh = Math.max(1, Math.min(canvas.height - sy, Math.ceil(wh)));
+            }
+          }
+          ctx2d.drawImage(canvas, sx, sy, sw, sh, 0, 0, 48, 48);
           const data = ctx2d.getImageData(0, 0, 48, 48).data;
           let varied = 0;
           const baseR = data[0] ?? 0;
@@ -529,7 +734,7 @@ class SandboxRuntime {
               Math.abs((data[i] ?? 0) - baseR) +
               Math.abs((data[i + 1] ?? 0) - baseG) +
               Math.abs((data[i + 2] ?? 0) - baseB);
-            if (diff > 18) varied += 1;
+            if (diff > 12) varied += 1;
           }
           nonZeroPixelRatio = Number((varied / totalPixels).toFixed(4));
           blankCanvas = nonZeroPixelRatio < 0.01;
@@ -565,6 +770,8 @@ window.addEventListener("message", (event) => {
     runtime.updateConfig(data.configValues);
   } else if (data.type === "SET_DEVICE_MODE") {
     runtime.setDeviceMode(data.deviceMode);
+  } else if (data.type === "SET_TARGET_FPS") {
+    runtime.setTargetFps(data.targetFps);
   } else if (data.type === "RESTART_GAME") {
     void runtime.restart();
   } else if (data.type === "SET_PAUSED") {
@@ -610,7 +817,6 @@ async function bootFromQueryParams(): Promise<void> {
           : "pc";
 
       if (data.spec?.mode === "multiplayer") {
-        // Show clean platform HTML launcher to create or join a live workerd multiplayer room
         statusBanner.style.display = "none";
         lobbyRoot.innerHTML = "";
         const card = document.createElement("div");
@@ -696,7 +902,6 @@ async function bootFromQueryParams(): Promise<void> {
         return;
       }
 
-      // Singleplayer published release: load & play immediately!
       await runtime.load({
         spec: data.spec,
         configSchema: data.configSchema ?? [],

@@ -313,7 +313,7 @@ export function createSimulation() {
 }
 `;
 
-const rendererCode = `import { Graphics } from "pixi.js";
+const rendererCode = `import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import { lerpPos } from "@aa-game/game-sdk";
 
 function parseHexColor(hex: string): number {
@@ -323,17 +323,111 @@ function parseHexColor(hex: string): number {
 }
 
 export function createRenderer() {
-  let gfx: Graphics;
+  let bgGfx: Graphics;
+  let entityLayer: Container;
+  let blueStarTex: Texture;
+  let goldStarTex: Texture;
+  let playerDiscTex: Texture;
+  let dashHaloTex: Texture;
+  let selfRingTex: Texture;
+  let eyeDotTex: Texture;
+
+  const starPool: Sprite[] = [];
+  const playerViews = new Map<string, { root: Container; halo: Sprite; body: Sprite; ring: Sprite; eye: Sprite }>();
+
   let hudEl: HTMLDivElement;
+  let boardEl: HTMLDivElement;
+  let timerEl: HTMLDivElement;
+  let finishOverlay: HTMLDivElement;
+  let winnerEl: HTMLDivElement;
+
+  let lastBoardKey = "";
+  let lastTimerSec = -1;
+  let lastPhase = "";
+
+  function bakeTex(app: any, draw: (g: Graphics) => void): Texture {
+    const g = new Graphics();
+    draw(g);
+    const tex = app.renderer.generateTexture({ target: g, resolution: 2 });
+    g.destroy();
+    return tex;
+  }
 
   return {
     init(ctx: any) {
-      gfx = new Graphics();
-      ctx.worldLayer.addChild(gfx);
+      const w = ctx.worldSize.width;
+      const h = ctx.worldSize.height;
 
+      // 1. Static arena floor & grid cached ONCE into a GPU texture
+      bgGfx = new Graphics();
+      bgGfx.rect(0, 0, w, h).fill({ color: 0x0b1120 });
+      bgGfx.roundRect(12, 52, w - 24, h - 64, 18).stroke({ color: 0x334155, width: 3 });
+      for (let x = 60; x < w - 20; x += 60) {
+        bgGfx.moveTo(x, 54).lineTo(x, h - 14).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
+      }
+      for (let y = 100; y < h - 20; y += 60) {
+        bgGfx.moveTo(14, y).lineTo(w - 14, y).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
+      }
+      if (typeof bgGfx.cacheAsTexture === "function") {
+        bgGfx.cacheAsTexture(true);
+      }
+      ctx.worldLayer.addChild(bgGfx);
+
+      // 2. Pre-bake reusable textures once
+      blueStarTex = bakeTex(ctx.app, (g) => {
+        g.circle(18, 18, 16.5).fill({ color: 0x38bdf8, alpha: 0.24 });
+        g.circle(18, 18, 11).fill({ color: 0x7dd3fc });
+      });
+      goldStarTex = bakeTex(ctx.app, (g) => {
+        g.circle(24, 24, 22.5).fill({ color: 0xf59e0b, alpha: 0.24 });
+        g.circle(24, 24, 15).fill({ color: 0xfde047 });
+      });
+      playerDiscTex = bakeTex(ctx.app, (g) => {
+        g.circle(22, 22, 20).fill({ color: 0xffffff });
+      });
+      dashHaloTex = bakeTex(ctx.app, (g) => {
+        g.circle(36, 36, 34).fill({ color: 0xffffff, alpha: 0.35 });
+      });
+      selfRingTex = bakeTex(ctx.app, (g) => {
+        g.circle(28, 28, 25).stroke({ color: 0xffffff, width: 2.5 });
+      });
+      eyeDotTex = bakeTex(ctx.app, (g) => {
+        g.circle(6, 6, 5).fill({ color: 0x0f172a });
+      });
+
+      entityLayer = new Container();
+      ctx.worldLayer.addChild(entityLayer);
+
+      // 3. Build HUD DOM skeleton ONCE (dirty-checked updates)
       hudEl = document.createElement("div");
       hudEl.style.cssText =
         "position:absolute;top:max(10px,env(safe-area-inset-top));left:12px;right:12px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;font-family:system-ui,-apple-system,sans-serif;color:#f8fafc;z-index:15;";
+
+      boardEl = document.createElement("div");
+      boardEl.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;";
+
+      timerEl = document.createElement("div");
+      timerEl.style.cssText =
+        "background:rgba(15,23,42,0.82);border:1px solid rgba(52,211,153,0.45);padding:5px 12px;border-radius:10px;font-weight:800;font-size:14px;color:#34d399;";
+
+      finishOverlay = document.createElement("div");
+      finishOverlay.style.cssText =
+        "position:fixed;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none;";
+      const finCard = document.createElement("div");
+      finCard.style.cssText =
+        "background:rgba(11,17,32,0.92);border:1px solid rgba(52,211,153,0.6);padding:22px 32px;border-radius:16px;text-align:center;";
+      const finTitle = document.createElement("div");
+      finTitle.style.cssText = "font-size:24px;font-weight:800;color:#f8fafc;";
+      finTitle.textContent = "对局结束";
+      winnerEl = document.createElement("div");
+      winnerEl.style.cssText = "margin-top:8px;font-size:18px;color:#fde047;";
+      const finHint = document.createElement("div");
+      finHint.style.cssText = "margin-top:8px;font-size:13px;color:#94a3b8;";
+      finHint.textContent = "点击上方“重开”开启新一轮竞技";
+      finCard.append(finTitle, winnerEl, finHint);
+      finishOverlay.appendChild(finCard);
+
+      hudEl.append(boardEl, timerEl, finishOverlay);
       ctx.hudDomRoot.appendChild(hudEl);
     },
 
@@ -344,80 +438,103 @@ export function createRenderer() {
     },
 
     render(state: any, prevState: any, alpha: number, ctx: any) {
-      const w = ctx.worldSize.width;
-      const h = ctx.worldSize.height;
-      gfx.clear();
-
-      // Arena floor & glowing boundary
-      gfx.rect(0, 0, w, h).fill({ color: 0x0b1120 });
-      gfx.roundRect(12, 52, w - 24, h - 64, 18).stroke({ color: 0x334155, width: 3 });
-
-      for (let x = 60; x < w - 20; x += 60) {
-        gfx.moveTo(x, 54).lineTo(x, h - 14).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
+      // Pooled stars
+      const stars = state.stars ?? [];
+      for (let i = 0; i < stars.length; i += 1) {
+        const st = stars[i]!;
+        const tex = st.value > 1 ? goldStarTex : blueStarTex;
+        let sp = starPool[i];
+        if (!sp) {
+          sp = new Sprite(tex);
+          sp.anchor.set(0.5);
+          entityLayer.addChild(sp);
+          starPool[i] = sp;
+        }
+        if (sp.texture !== tex) sp.texture = tex;
+        sp.visible = true;
+        sp.position.set(st.x, st.y);
       }
-      for (let y = 100; y < h - 20; y += 60) {
-        gfx.moveTo(14, y).lineTo(w - 14, y).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
-      }
-
-      // Stars
-      for (const st of state.stars ?? []) {
-        const isGold = st.value > 1;
-        const c = isGold ? 0xf59e0b : 0x38bdf8;
-        gfx.circle(st.x, st.y, st.radius * 1.5).fill({ color: c, alpha: 0.24 });
-        gfx.circle(st.x, st.y, st.radius).fill({ color: isGold ? 0xfde047 : 0x7dd3fc });
+      for (let i = stars.length; i < starPool.length; i += 1) {
+        starPool[i]!.visible = false;
       }
 
-      // Players (interpolated smoothly from authoritative snapshots)
+      // Pooled player containers
       const players = Object.values(state.players ?? {}) as any[];
+      const seen = new Set<string>();
       for (const p of players) {
+        seen.add(p.id);
+        let view = playerViews.get(p.id);
+        if (!view) {
+          const root = new Container();
+          const halo = new Sprite(dashHaloTex);
+          halo.anchor.set(0.5);
+          const body = new Sprite(playerDiscTex);
+          body.anchor.set(0.5);
+          const ring = new Sprite(selfRingTex);
+          ring.anchor.set(0.5);
+          const eye = new Sprite(eyeDotTex);
+          eye.anchor.set(0.5);
+          root.addChild(halo, body, ring, eye);
+          entityLayer.addChild(root);
+          view = { root, halo, body, ring, eye };
+          playerViews.set(p.id, view);
+        }
         const prevP = prevState?.players?.[p.id];
         const pos = lerpPos(prevP, p, alpha);
         const col = parseHexColor(p.color);
-        const isMe = p.id === ctx.localPlayerId;
-
-        if (p.dashTimer > 0) {
-          gfx.circle(pos.x, pos.y, p.radius * 1.7).fill({ color: col, alpha: 0.35 });
-        }
-        gfx.circle(pos.x, pos.y, p.radius).fill({ color: col });
-        if (isMe) {
-          gfx.circle(pos.x, pos.y, p.radius + 5).stroke({ color: 0xffffff, width: 2.5 });
-        }
-        gfx.circle(pos.x + p.lastDirX * 8, pos.y + p.lastDirY * 8, 5).fill({ color: 0x0f172a });
+        view.root.visible = true;
+        view.root.position.set(pos.x, pos.y);
+        view.body.tint = col;
+        view.halo.tint = col;
+        view.halo.visible = p.dashTimer > 0;
+        view.ring.visible = p.id === ctx.localPlayerId;
+        view.eye.position.set((p.lastDirX || 0) * 8, (p.lastDirY || 0) * 8);
+      }
+      for (const [id, view] of playerViews.entries()) {
+        if (!seen.has(id)) view.root.visible = false;
       }
 
+      // Dirty-checked HUD updates (only mutate DOM when scores/timer/phase change)
       const ranked = [...players].sort((a, b) => b.score - a.score);
-      const boardHtml = ranked
-        .map(
-          (p) =>
-            \`<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:rgba(15,23,42,0.78);border:1px solid \${p.color};font-size:12px;font-weight:700;">
-              <i style="width:8px;height:8px;border-radius:50%;background:\${p.color};display:inline-block;"></i>
-              \${p.name}\${p.id === ctx.localPlayerId ? " (你)" : ""}: <b style="color:#fde047">\${p.score}</b>
-            </span>\`,
-        )
-        .join(" ");
+      const boardKey = ranked.map((p) => \`\${p.id}:\${p.name}:\${p.score}:\${p.color}\`).join("|") + "|" + ctx.localPlayerId;
+      if (boardKey !== lastBoardKey) {
+        lastBoardKey = boardKey;
+        boardEl.innerHTML = ranked
+          .map(
+            (p) =>
+              \`<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:rgba(15,23,42,0.78);border:1px solid \${p.color};font-size:12px;font-weight:700;">
+                <i style="width:8px;height:8px;border-radius:50%;background:\${p.color};display:inline-block;"></i>
+                \${p.name}\${p.id === ctx.localPlayerId ? " (你)" : ""}: <b style="color:#fde047">\${p.score}</b>
+              </span>\`,
+          )
+          .join("");
+      }
 
-      hudEl.innerHTML = \`
-        <div style="display:flex;flex-wrap:wrap;gap:6px;">\${boardHtml}</div>
-        <div style="background:rgba(15,23,42,0.82);border:1px solid rgba(52,211,153,0.45);padding:5px 12px;border-radius:10px;font-weight:800;font-size:14px;color:#34d399;">
-          ⏱ \${Math.ceil(state.timeLeft ?? 0)}s
-        </div>
-      \`;
+      const sec = Math.ceil(state.timeLeft ?? 0);
+      if (sec !== lastTimerSec) {
+        lastTimerSec = sec;
+        timerEl.textContent = \`⏱ \${sec}s\`;
+      }
 
-      if (state.phase === "finished") {
-        hudEl.innerHTML += \`
-          <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
-            <div style="background:rgba(11,17,32,0.92);border:1px solid rgba(52,211,153,0.6);padding:22px 32px;border-radius:16px;text-align:center;">
-              <div style="font-size:24px;font-weight:800;color:#f8fafc;">对局结束</div>
-              <div style="margin-top:8px;font-size:18px;color:#fde047;">🏆 获胜者：\${state.winnerName ?? "平局"}</div>
-              <div style="margin-top:8px;font-size:13px;color:#94a3b8;">点击上方“重开”开启新一轮竞技</div>
-            </div>
-          </div>
-        \`;
+      const phase = state.phase ?? "playing";
+      if (phase !== lastPhase) {
+        lastPhase = phase;
+        finishOverlay.style.display = phase === "finished" ? "flex" : "none";
+        if (phase === "finished") {
+          winnerEl.textContent = \`🏆 获胜者：\${state.winnerName ?? "平局"}\`;
+        }
       }
     },
 
     destroy() {
-      gfx?.destroy();
+      bgGfx?.destroy();
+      entityLayer?.destroy({ children: true });
+      blueStarTex?.destroy(true);
+      goldStarTex?.destroy(true);
+      playerDiscTex?.destroy(true);
+      dashHaloTex?.destroy(true);
+      selfRingTex?.destroy(true);
+      eyeDotTex?.destroy(true);
       hudEl?.remove();
     },
   };

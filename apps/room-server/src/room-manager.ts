@@ -280,6 +280,16 @@ export class RoomManager {
     this.broadcastRoomUpdate(room);
   }
 
+  pauseGame(room: ManagedRoom): void {
+    this.stopTickLoop(room);
+  }
+
+  resumeGame(room: ManagedRoom): void {
+    if (room.phase === "playing" && room.clients.size > 0) {
+      this.startTickLoop(room);
+    }
+  }
+
   async restartGame(room: ManagedRoom): Promise<void> {
     this.stopTickLoop(room);
     room.version += 1;

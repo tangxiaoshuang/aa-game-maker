@@ -17,7 +17,6 @@ import type {
   ProjectDetail,
   ProjectSummary,
   RuntimeLogEntry,
-  RuntimeMetrics,
   RuntimeProbeResult,
   SmokeTestResponse,
   UserProfile,
@@ -27,6 +26,7 @@ import { compileGameProject } from "@/lib/bundler";
 import { platformApi } from "@/lib/platform-api";
 import { AgentChatPanel } from "@/components/AgentChatPanel";
 import { AuthModal } from "@/components/AuthModal";
+import { StageMetricsReadout } from "@/components/StageMetricsReadout";
 import {
   AssetUploadAndGenPanel,
   PublishModal,
@@ -77,6 +77,7 @@ export function StudioWorkbench() {
 
   const [leftTab, setLeftTab] = useState<LeftTab>("agent");
   const [deviceMode, setDeviceMode] = useState<DeviceViewportMode>("pc");
+  const [targetFps, setTargetFps] = useState<30 | 60>(60);
   const [splitMultiplayer, setSplitMultiplayer] = useState<boolean>(false);
   const [paused, setPaused] = useState<boolean>(false);
 
@@ -95,7 +96,6 @@ export function StudioWorkbench() {
   const [publishOpen, setPublishOpen] = useState(false);
 
   const [logs, setLogs] = useState<RuntimeLogEntry[]>([]);
-  const [metrics, setMetrics] = useState<RuntimeMetrics>({ fps: 0, tick: 0 });
   const [verifyReport, setVerifyReport] = useState<FullVerifyReport | null>(null);
   const [isBuilding, setIsBuilding] = useState<boolean>(false);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
@@ -189,8 +189,6 @@ export function StudioWorkbench() {
       if (!data || data.channel !== "aa-game-sandbox") return;
       if (data.type === "RUNTIME_LOG") {
         setLogs((prev) => [...prev.slice(-40), data.entry]);
-      } else if (data.type === "METRICS") {
-        if (event.source === primaryFrameRef.current?.contentWindow) setMetrics(data.metrics);
       } else if (data.type === "PROBE_RESULT") {
         if (probeResolverRef.current) {
           probeResolverRef.current(data.result);
@@ -304,6 +302,7 @@ export function StudioWorkbench() {
         clientBundle: compiled.clientBundle,
         simBundle: compiled.simBundle,
         deviceMode: curDevice,
+        targetFps,
         roomWsUrl: activeRoom ? `${ROOM_WS_URL}${activeRoom.wsPath}` : undefined,
         roomId: activeRoom?.roomId,
         roomCode: activeRoom?.roomCode,
@@ -324,7 +323,12 @@ export function StudioWorkbench() {
             {
               channel: "aa-game-sandbox",
               type: "LOAD_GAME",
-              payload: { ...loadPayloadBase, deviceMode: "mobile-landscape", playerName: "模拟玩家 2" },
+              payload: {
+                ...loadPayloadBase,
+                deviceMode: "mobile-landscape",
+                targetFps: 30,
+                playerName: "模拟玩家 2",
+              },
             },
             "secondary",
           );
@@ -342,6 +346,7 @@ export function StudioWorkbench() {
       parseSpecAndAssets,
       postToFrames,
       splitMultiplayer,
+      targetFps,
       user?.displayName,
     ],
   );
@@ -1211,17 +1216,21 @@ export function StudioWorkbench() {
         <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           <div
             style={{
-              height: 44,
-              padding: "0 14px",
+              minHeight: 44,
+              padding: "6px 12px",
               borderBottom: "1px solid #1e293b",
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
+              flexWrap: "wrap",
+              rowGap: 6,
+              columnGap: 10,
               background: "#0f172a",
               fontSize: 12,
+              flexShrink: 0,
             }}
           >
-            <div style={{ display: "flex", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
               {(
                 [
                   ["pc", "💻 PC"],
@@ -1233,13 +1242,15 @@ export function StudioWorkbench() {
                   key={mode}
                   onClick={() => handleDeviceSwitch(mode)}
                   style={{
-                    padding: "4px 10px",
+                    padding: "4px 9px",
                     borderRadius: 6,
                     border: "1px solid #334155",
                     background: deviceMode === mode ? "#38bdf8" : "#1e293b",
                     color: deviceMode === mode ? "#0f172a" : "#cbd5e1",
                     fontWeight: 700,
                     cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
                   }}
                 >
                   {label}
@@ -1247,11 +1258,29 @@ export function StudioWorkbench() {
               ))}
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ color: "#94a3b8", fontFamily: "monospace" }}>
-                FPS: <b style={{ color: "#34d399" }}>{metrics.fps}</b> · Tick: {metrics.tick}
-                {metrics.roomCode ? ` · 房 ${metrics.roomCode} (${metrics.playersCount ?? 0}人 · ${metrics.latencyMs ?? 0}ms)` : ""}
-              </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
+              <StageMetricsReadout frameRef={primaryFrameRef} />
+              <button
+                onClick={() => {
+                  const next: 30 | 60 = targetFps === 60 ? 30 : 60;
+                  setTargetFps(next);
+                  postToFrames({ channel: "aa-game-sandbox", type: "SET_TARGET_FPS", targetFps: next }, "primary");
+                }}
+                title="切换 60 FPS 标准模式 / 30 FPS 省电模式"
+                style={{
+                  background: targetFps === 30 ? "rgba(16,185,129,0.2)" : "#1e293b",
+                  color: targetFps === 30 ? "#34d399" : "#cbd5e1",
+                  border: `1px solid ${targetFps === 30 ? "#10b981" : "#334155"}`,
+                  borderRadius: 6,
+                  padding: "4px 8px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                }}
+              >
+                {targetFps === 30 ? "🍃 30 FPS 省电" : "⚡ 60 FPS"}
+              </button>
               <button
                 onClick={() => {
                   const next = !paused;
@@ -1259,12 +1288,15 @@ export function StudioWorkbench() {
                   postToFrames({ channel: "aa-game-sandbox", type: "SET_PAUSED", paused: next });
                 }}
                 style={{
-                  background: "#1e293b",
-                  color: "#e2e8f0",
+                  background: paused ? "#f59e0b" : "#1e293b",
+                  color: paused ? "#0f172a" : "#e2e8f0",
                   border: "1px solid #334155",
                   borderRadius: 6,
-                  padding: "4px 10px",
+                  padding: "4px 9px",
+                  fontWeight: 700,
                   cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
                 }}
               >
                 {paused ? "继续" : "暂停"}
@@ -1276,8 +1308,10 @@ export function StudioWorkbench() {
                   color: "#e2e8f0",
                   border: "1px solid #334155",
                   borderRadius: 6,
-                  padding: "4px 10px",
+                  padding: "4px 9px",
                   cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
                 }}
               >
                 重开
@@ -1300,7 +1334,7 @@ export function StudioWorkbench() {
             <div
               style={{
                 ...(splitMultiplayer && currentSpec.mode === "multiplayer"
-                  ? { flex: 1, height: "100%", borderRadius: 12 }
+                  ? { flex: 1, minWidth: 0, height: "100%", borderRadius: 12 }
                   : viewportBoxStyle),
                 border: "2px solid #1e293b",
                 overflow: "hidden",
@@ -1323,6 +1357,7 @@ export function StudioWorkbench() {
               <div
                 style={{
                   flex: 1,
+                  minWidth: 0,
                   height: "100%",
                   borderRadius: 12,
                   border: "2px solid #312e81",

@@ -60,22 +60,24 @@ export class UnifiedInputController {
 
     const wrapper = document.createElement("div");
     wrapper.style.cssText =
-      "position:absolute;inset:0;pointer-events:none;display:flex;justify-content:space-between;align-items:flex-end;padding:0 max(18px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));z-index:20;";
+      "position:absolute;inset:0;box-sizing:border-box;pointer-events:none;display:flex;justify-content:space-between;align-items:flex-end;gap:clamp(6px, 2vw, 14px);padding:0 max(clamp(8px, 3vw, 18px), env(safe-area-inset-right)) max(clamp(10px, 3vh, 20px), env(safe-area-inset-bottom)) max(clamp(8px, 3vw, 18px), env(safe-area-inset-left));z-index:20;";
 
     if (options.joystick) {
       const base = document.createElement("div");
+      // Avoid expensive CSS backdrop-filter blur over high-frequency WebGL canvases.
+      // Scale gracefully via clamp() so narrow split-view iframes never clip controls.
       base.style.cssText =
-        "width:108px;height:108px;border-radius:999px;background:rgba(15,23,42,0.45);border:2px solid rgba(148,163,184,0.45);backdrop-filter:blur(6px);pointer-events:auto;touch-action:none;position:relative;display:flex;align-items:center;justify-content:center;";
+        "width:clamp(72px, 26vw, 108px);height:clamp(72px, 26vw, 108px);flex-shrink:0;border-radius:999px;background:radial-gradient(circle, rgba(30,41,59,0.52), rgba(15,23,42,0.72));border:2px solid rgba(148,163,184,0.45);pointer-events:auto;touch-action:none;position:relative;display:flex;align-items:center;justify-content:center;";
       const knob = document.createElement("div");
       knob.style.cssText =
-        "width:44px;height:44px;border-radius:999px;background:rgba(56,189,248,0.85);box-shadow:0 0 14px rgba(56,189,248,0.55);transform:translate(0px,0px);pointer-events:none;";
+        "width:clamp(30px, 11vw, 44px);height:clamp(30px, 11vw, 44px);border-radius:999px;background:rgba(56,189,248,0.85);box-shadow:0 0 14px rgba(56,189,248,0.55);transform:translate(0px,0px);pointer-events:none;";
       base.appendChild(knob);
 
       let activePointerId: number | null = null;
-      const maxRadius = 34;
 
       const updateStick = (clientX: number, clientY: number) => {
         const rect = base.getBoundingClientRect();
+        const maxRadius = Math.max(16, rect.width * 0.315);
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
         let dx = clientX - cx;
@@ -121,13 +123,13 @@ export class UnifiedInputController {
     }
 
     const btnCol = document.createElement("div");
-    btnCol.style.cssText = "display:flex;gap:12px;align-items:center;pointer-events:none;";
+    btnCol.style.cssText = "display:flex;gap:clamp(6px, 2vw, 12px);align-items:center;pointer-events:none;flex-shrink:0;";
     for (const btnSpec of options.buttons) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = btnSpec.label;
       const bg = btnSpec.color ?? (btnSpec.id === "primary" ? "rgba(56,189,248,0.85)" : "rgba(244,114,182,0.85)");
-      btn.style.cssText = `width:68px;height:68px;border-radius:999px;border:2px solid rgba(255,255,255,0.45);background:${bg};color:#0f172a;font-weight:700;font-size:13px;pointer-events:auto;touch-action:none;user-select:none;box-shadow:0 4px 16px rgba(0,0,0,0.35);`;
+      btn.style.cssText = `width:clamp(46px, 17vw, 68px);height:clamp(46px, 17vw, 68px);padding:0;display:flex;align-items:center;justify-content:center;border-radius:999px;border:2px solid rgba(255,255,255,0.45);background:${bg};color:#0f172a;font-weight:700;font-size:clamp(10px, 3.4vw, 13px);white-space:nowrap;pointer-events:auto;touch-action:none;user-select:none;box-shadow:0 4px 16px rgba(0,0,0,0.35);`;
 
       const setPressed = (down: boolean) => {
         btn.style.transform = down ? "scale(0.92)" : "scale(1)";

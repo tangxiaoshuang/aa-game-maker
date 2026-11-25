@@ -31,7 +31,11 @@ Follow these strict architectural invariants so games run smoothly on **both PC 
    - Multiplayer lobby and mobile virtual joystick/buttons are mounted by the platform shell automatically.
    - Render score/lives/timer/game-over HUD inside \`ctx.hudDomRoot\` with \`pointer-events:none\` and \`top: max(12px, env(safe-area-inset-top))\` so mobile notches and virtual controls at the bottom are never obstructed!
 4. **Smooth Interpolation**: Always use \`lerpPos(prevEntity, currEntity, alpha)\` for moving entities so 20Hz networked snapshots render at 60fps.
-5. **Clean Teardown**: Implement \`destroy()\` to remove DOM nodes and destroy Graphics.
+5. **High-Performance Rendering (CRITICAL — Low CPU/GPU)**:
+   - Draw static backgrounds & grids ONCE in \`init()\` and call \`bgGfx.cacheAsTexture(true)\`. NEVER call \`gfx.clear()\` to redraw static backgrounds or dozens of circles every frame!
+   - Pre-bake repeated dynamic shapes in \`init()\` via \`ctx.app.renderer.generateTexture({ target: tempGfx, resolution: 2 })\` and reuse pooled \`Sprite\` instances (updating only \`.position\`, \`.scale\`, \`.tint\`, \`.visible\` per frame).
+   - **Dirty-check DOM HUD updates**: create HUD elements once in \`init()\` and update \`textContent\` / \`style.display\` ONLY when values change. NEVER overwrite \`hudEl.innerHTML\` every frame!
+6. **Clean Teardown**: Implement \`destroy()\` to remove DOM nodes and destroy Graphics, Containers, and generated Textures.
 
 ## 4. Mandatory Verification Self-Repair Loop
 After making code changes, ALWAYS call \`game_verify\`.

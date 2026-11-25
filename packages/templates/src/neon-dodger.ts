@@ -247,21 +247,149 @@ export function createSimulation() {
 }
 `;
 
-const rendererCode = `import { Graphics } from "pixi.js";
+const rendererCode = `import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import { lerpPos } from "@aa-game/game-sdk";
 
 export function createRenderer() {
-  let gfx: Graphics;
+  let bgGfx: Graphics;
+  let entityLayer: Container;
+  let shipTex: Texture;
+  let dashShipTex: Texture;
+  let starTex: Texture;
+  let hazardTex: Texture;
+  let playerSprite: Sprite;
+  const starPool: Sprite[] = [];
+  const hazardPool: Sprite[] = [];
+  const prevHazardMap = new Map<number, { x: number; y: number }>();
+
   let hudEl: HTMLDivElement;
+  let scoreEl: HTMLSpanElement;
+  let bestEl: HTMLSpanElement;
+  let heartsEl: HTMLSpanElement;
+  let dashEl: HTMLSpanElement;
+  let gameoverEl: HTMLDivElement;
+  let finalScoreEl: HTMLDivElement;
+
+  let lastScore = -1;
+  let lastBest = -1;
+  let lastLives = -1;
+  let lastDashText = "";
+  let lastStatus = "";
+
+  function bakeCircleTex(app: any, outerR: number, layers: Array<{ r: number; color: number; alpha?: number; ox?: number; oy?: number }>): Texture {
+    const g = new Graphics();
+    for (const l of layers) {
+      g.circle(outerR + (l.ox ?? 0), outerR + (l.oy ?? 0), l.r).fill({ color: l.color, alpha: l.alpha ?? 1 });
+    }
+    const tex = app.renderer.generateTexture({ target: g, resolution: 2 });
+    g.destroy();
+    return tex;
+  }
+
+  function ensureSprite(pool: Sprite[], idx: number, tex: Texture): Sprite {
+    let sp = pool[idx];
+    if (!sp) {
+      sp = new Sprite(tex);
+      sp.anchor.set(0.5);
+      entityLayer.addChild(sp);
+      pool[idx] = sp;
+    }
+    sp.visible = true;
+    return sp;
+  }
 
   return {
     init(ctx: any) {
-      gfx = new Graphics();
-      ctx.worldLayer.addChild(gfx);
+      const w = ctx.worldSize.width;
+      const h = ctx.worldSize.height;
 
+      // 1. Static background & neon grid drawn ONCE and cached as a single GPU texture
+      bgGfx = new Graphics();
+      bgGfx.rect(0, 0, w, h).fill({ color: 0x070b18 });
+      const gridStep = 45;
+      for (let x = gridStep; x < w; x += gridStep) {
+        bgGfx.moveTo(x, 0).lineTo(x, h).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
+      }
+      for (let y = gridStep; y < h; y += gridStep) {
+        bgGfx.moveTo(0, y).lineTo(w, y).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
+      }
+      if (typeof bgGfx.cacheAsTexture === "function") {
+        bgGfx.cacheAsTexture(true);
+      }
+      ctx.worldLayer.addChild(bgGfx);
+
+      // 2. Pre-bake entity textures once (zero per-frame Graphics triangulation)
+      starTex = bakeCircleTex(ctx.app, 22, [
+        { r: 20, color: 0xfacc15, alpha: 0.22 },
+        { r: 13, color: 0xfde047 },
+        { r: 6, color: 0xffffff },
+      ]);
+      hazardTex = bakeCircleTex(ctx.app, 28, [
+        { r: 26, color: 0xf43f5e, alpha: 0.22 },
+        { r: 20, color: 0xfb7185 },
+        { r: 6.5, color: 0xffe4e6, alpha: 0.65, ox: -5, oy: -5 },
+      ]);
+      shipTex = bakeCircleTex(ctx.app, 32, [
+        { r: 26, color: 0x38bdf8, alpha: 0.25 },
+        { r: 18, color: 0x38bdf8 },
+        { r: 9, color: 0xe0f2fe },
+      ]);
+      dashShipTex = bakeCircleTex(ctx.app, 36, [
+        { r: 34, color: 0x22d3ee, alpha: 0.3 },
+        { r: 18, color: 0x22d3ee },
+        { r: 9, color: 0xe0f2fe },
+      ]);
+
+      entityLayer = new Container();
+      ctx.worldLayer.addChild(entityLayer);
+
+      playerSprite = new Sprite(shipTex);
+      playerSprite.anchor.set(0.5);
+      entityLayer.addChild(playerSprite);
+
+      // 3. Build HUD DOM nodes ONCE and update only changed textContent (dirty-checked)
       hudEl = document.createElement("div");
       hudEl.style.cssText =
         "position:absolute;top:max(12px,env(safe-area-inset-top));left:14px;right:14px;display:flex;justify-content:space-between;align-items:center;pointer-events:none;font-family:system-ui,-apple-system,sans-serif;color:#f8fafc;z-index:15;";
+
+      const leftBox = document.createElement("div");
+      leftBox.style.cssText =
+        "background:rgba(15,23,42,0.72);border:1px solid rgba(56,189,248,0.4);padding:6px 12px;border-radius:10px;font-weight:700;font-size:14px;";
+      leftBox.append("得分 ");
+      scoreEl = document.createElement("span");
+      scoreEl.style.color = "#fde047";
+      leftBox.appendChild(scoreEl);
+      bestEl = document.createElement("span");
+      bestEl.style.cssText = "margin-left:10px;color:#94a3b8;font-size:12px;";
+      leftBox.appendChild(bestEl);
+
+      const rightBox = document.createElement("div");
+      rightBox.style.cssText =
+        "background:rgba(15,23,42,0.72);border:1px solid rgba(244,63,94,0.4);padding:6px 12px;border-radius:10px;font-weight:700;font-size:14px;";
+      heartsEl = document.createElement("span");
+      heartsEl.style.cssText = "color:#fb7185;letter-spacing:2px;";
+      dashEl = document.createElement("span");
+      dashEl.style.cssText = "margin-left:10px;color:#38bdf8;font-size:12px;";
+      rightBox.append(heartsEl, dashEl);
+
+      gameoverEl = document.createElement("div");
+      gameoverEl.style.cssText =
+        "position:fixed;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none;";
+      const card = document.createElement("div");
+      card.style.cssText =
+        "background:rgba(7,11,24,0.88);border:1px solid rgba(56,189,248,0.5);padding:20px 28px;border-radius:16px;text-align:center;";
+      const overTitle = document.createElement("div");
+      overTitle.style.cssText = "font-size:24px;font-weight:800;color:#f8fafc;";
+      overTitle.textContent = "挑战结束";
+      finalScoreEl = document.createElement("div");
+      finalScoreEl.style.cssText = "margin-top:8px;font-size:16px;color:#fde047;";
+      const hint = document.createElement("div");
+      hint.style.cssText = "margin-top:10px;font-size:13px;color:#94a3b8;";
+      hint.textContent = "按 Space 或点击“冲刺”再来一局";
+      card.append(overTitle, finalScoreEl, hint);
+      gameoverEl.appendChild(card);
+
+      hudEl.append(leftBox, rightBox, gameoverEl);
       ctx.hudDomRoot.appendChild(hudEl);
     },
 
@@ -271,36 +399,39 @@ export function createRenderer() {
       }
     },
 
-    render(state: any, prevState: any, alpha: number, ctx: any) {
-      const w = ctx.worldSize.width;
-      const h = ctx.worldSize.height;
-      gfx.clear();
-
-      // Deep space background & subtle neon grid
-      gfx.rect(0, 0, w, h).fill({ color: 0x070b18 });
-      const gridStep = 45;
-      for (let x = gridStep; x < w; x += gridStep) {
-        gfx.moveTo(x, 0).lineTo(x, h).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
-      }
-      for (let y = gridStep; y < h; y += gridStep) {
-        gfx.moveTo(0, y).lineTo(w, y).stroke({ color: 0x1e293b, width: 1, alpha: 0.45 });
-      }
-
-      // Collectible energy stars
-      for (const star of state.stars ?? []) {
+    render(state: any, prevState: any, alpha: number) {
+      // Collectible energy stars (pooled sprites)
+      const stars = state.stars ?? [];
+      for (let i = 0; i < stars.length; i += 1) {
+        const star = stars[i]!;
+        const sp = ensureSprite(starPool, i, starTex);
         const pulse = 1 + Math.sin(star.pulse) * 0.16;
-        gfx.circle(star.x, star.y, star.radius * 1.45 * pulse).fill({ color: 0xfacc15, alpha: 0.22 });
-        gfx.circle(star.x, star.y, star.radius * pulse).fill({ color: 0xfde047 });
-        gfx.circle(star.x, star.y, star.radius * 0.45).fill({ color: 0xffffff });
+        sp.position.set(star.x, star.y);
+        sp.scale.set((star.radius / 13) * pulse);
+      }
+      for (let i = stars.length; i < starPool.length; i += 1) {
+        starPool[i]!.visible = false;
       }
 
-      // Hazards
-      for (const hz of state.hazards ?? []) {
-        const prevHz = prevState?.hazards?.find((item: any) => item.id === hz.id);
-        const pos = lerpPos(prevHz, hz, alpha);
-        gfx.circle(pos.x, pos.y, hz.radius * 1.22).fill({ color: 0xf43f5e, alpha: 0.22 });
-        gfx.circle(pos.x, pos.y, hz.radius).fill({ color: 0xfb7185 });
-        gfx.circle(pos.x - hz.radius * 0.25, pos.y - hz.radius * 0.25, hz.radius * 0.32).fill({ color: 0xffe4e6, alpha: 0.65 });
+      // Hazards (O(1) Map lookup + pooled sprites)
+      prevHazardMap.clear();
+      const prevHazards = prevState?.hazards;
+      if (prevHazards) {
+        for (let i = 0; i < prevHazards.length; i += 1) {
+          const item = prevHazards[i]!;
+          prevHazardMap.set(item.id, item);
+        }
+      }
+      const hazards = state.hazards ?? [];
+      for (let i = 0; i < hazards.length; i += 1) {
+        const hz = hazards[i]!;
+        const sp = ensureSprite(hazardPool, i, hazardTex);
+        const pos = lerpPos(prevHazardMap.get(hz.id), hz, alpha);
+        sp.position.set(pos.x, pos.y);
+        sp.scale.set(hz.radius / 20);
+      }
+      for (let i = hazards.length; i < hazardPool.length; i += 1) {
+        hazardPool[i]!.visible = false;
       }
 
       // Player ship
@@ -308,42 +439,53 @@ export function createRenderer() {
       if (p) {
         const pos = lerpPos(prevState?.player, p, alpha);
         const blink = p.invulnTimer > 0 && Math.floor(p.invulnTimer * 18) % 2 === 0;
-        const bodyColor = p.dashTimer > 0 ? 0x22d3ee : 0x38bdf8;
+        playerSprite.visible = !blink;
         if (!blink) {
-          gfx.circle(pos.x, pos.y, p.radius * (p.dashTimer > 0 ? 1.85 : 1.4)).fill({ color: bodyColor, alpha: 0.25 });
-          gfx.circle(pos.x, pos.y, p.radius).fill({ color: bodyColor });
-          gfx.circle(pos.x, pos.y, p.radius * 0.5).fill({ color: 0xe0f2fe });
+          const targetTex = p.dashTimer > 0 ? dashShipTex : shipTex;
+          if (playerSprite.texture !== targetTex) playerSprite.texture = targetTex;
+          playerSprite.position.set(pos.x, pos.y);
         }
       }
 
-      const hearts = "♥".repeat(Math.max(0, state.lives ?? 0));
-      const dashReady = (p?.dashCooldown ?? 0) <= 0.01 ? "冲刺就绪" : \`冷却 \${(p.dashCooldown).toFixed(1)}s\`;
-      hudEl.innerHTML = \`
-        <div style="background:rgba(15,23,42,0.72);border:1px solid rgba(56,189,248,0.4);padding:6px 12px;border-radius:10px;font-weight:700;font-size:14px;">
-          得分 <span style="color:#fde047">\${state.score}</span>
-          <span style="margin-left:10px;color:#94a3b8;font-size:12px;">最高 \${Math.max(state.bestScore ?? 0, state.score ?? 0)}</span>
-        </div>
-        <div style="background:rgba(15,23,42,0.72);border:1px solid rgba(244,63,94,0.4);padding:6px 12px;border-radius:10px;font-weight:700;font-size:14px;">
-          <span style="color:#fb7185;letter-spacing:2px;">\${hearts || "0"}</span>
-          <span style="margin-left:10px;color:#38bdf8;font-size:12px;">\${dashReady}</span>
-        </div>
-      \`;
+      // Dirty-checked HUD updates (0 DOM writes when unchanged)
+      const score = state.score ?? 0;
+      const best = Math.max(state.bestScore ?? 0, score);
+      const lives = Math.max(0, state.lives ?? 0);
+      const dashText = (p?.dashCooldown ?? 0) <= 0.01 ? "冲刺就绪" : \`冷却 \${p.dashCooldown.toFixed(1)}s\`;
+      const status = state.status ?? "playing";
 
-      if (state.status === "gameover") {
-        hudEl.innerHTML += \`
-          <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
-            <div style="background:rgba(7,11,24,0.88);border:1px solid rgba(56,189,248,0.5);padding:20px 28px;border-radius:16px;text-align:center;">
-              <div style="font-size:24px;font-weight:800;color:#f8fafc;">挑战结束</div>
-              <div style="margin-top:8px;font-size:16px;color:#fde047;">本局得分：\${state.score}</div>
-              <div style="margin-top:10px;font-size:13px;color:#94a3b8;">按 Space 或点击“冲刺”再来一局</div>
-            </div>
-          </div>
-        \`;
+      if (score !== lastScore) {
+        lastScore = score;
+        scoreEl.textContent = String(score);
+      }
+      if (best !== lastBest) {
+        lastBest = best;
+        bestEl.textContent = \`最高 \${best}\`;
+      }
+      if (lives !== lastLives) {
+        lastLives = lives;
+        heartsEl.textContent = "♥".repeat(lives) || "0";
+      }
+      if (dashText !== lastDashText) {
+        lastDashText = dashText;
+        dashEl.textContent = dashText;
+      }
+      if (status !== lastStatus) {
+        lastStatus = status;
+        gameoverEl.style.display = status === "gameover" ? "flex" : "none";
+        if (status === "gameover") {
+          finalScoreEl.textContent = \`本局得分：\${score}\`;
+        }
       }
     },
 
     destroy() {
-      gfx?.destroy();
+      bgGfx?.destroy();
+      entityLayer?.destroy({ children: true });
+      shipTex?.destroy(true);
+      dashShipTex?.destroy(true);
+      starTex?.destroy(true);
+      hazardTex?.destroy(true);
       hudEl?.remove();
     },
   };

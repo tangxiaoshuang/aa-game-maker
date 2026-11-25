@@ -37,6 +37,12 @@ export const ClientRoomMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("restart"),
   }),
   z.object({
+    type: z.literal("pause"),
+  }),
+  z.object({
+    type: z.literal("resume"),
+  }),
+  z.object({
     type: z.literal("input"),
     input: PlayerInputStateSchema,
   }),

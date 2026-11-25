@@ -10,6 +10,7 @@ export interface LoadGamePayload {
   clientBundle: string;
   simBundle: string;
   deviceMode: DeviceViewportMode;
+  targetFps?: number;
   roomWsUrl?: string;
   roomId?: string;
   roomCode?: string;
@@ -21,6 +22,7 @@ export type WorkbenchToPlayerMessage =
   | { channel: "aa-game-sandbox"; type: "LOAD_GAME"; payload: LoadGamePayload }
   | { channel: "aa-game-sandbox"; type: "UPDATE_CONFIG"; configValues: GameConfigValues }
   | { channel: "aa-game-sandbox"; type: "SET_DEVICE_MODE"; deviceMode: DeviceViewportMode }
+  | { channel: "aa-game-sandbox"; type: "SET_TARGET_FPS"; targetFps: number }
   | { channel: "aa-game-sandbox"; type: "RESTART_GAME" }
   | { channel: "aa-game-sandbox"; type: "SET_PAUSED"; paused: boolean }
   | { channel: "aa-game-sandbox"; type: "RUN_PROBE" };
@@ -34,6 +36,9 @@ export interface RuntimeLogEntry {
 
 export interface RuntimeMetrics {
   fps: number;
+  renderMs?: number;
+  targetFps?: number;
+  paused?: boolean;
   tick: number;
   roomId?: string;
   roomCode?: string;

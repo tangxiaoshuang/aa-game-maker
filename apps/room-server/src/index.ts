@@ -187,6 +187,10 @@ export async function createRoomServerApp(options?: {
             roomManager.setReady(room, boundPlayerId, msg.ready);
           } else if (msg.type === "start") {
             roomManager.startGame(room);
+          } else if (msg.type === "pause") {
+            roomManager.pauseGame(room);
+          } else if (msg.type === "resume") {
+            roomManager.resumeGame(room);
           } else if (msg.type === "restart") {
             await roomManager.restartGame(room);
           } else if (msg.type === "input") {
